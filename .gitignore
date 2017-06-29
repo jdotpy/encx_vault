@@ -1,0 +1,11 @@
+*.pyc
+*.swp
+
+# Prevent accidental badness
+*.encx
+*.key
+*.pem
+
+# Project Specific
+.venv
+.pyenv
