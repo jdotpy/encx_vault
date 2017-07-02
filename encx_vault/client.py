@@ -1,5 +1,6 @@
 from .fingerprint_store import FingerprintStore
 from encxlib import security
+from encxlib import schemes
 
 import requests
 
@@ -9,7 +10,6 @@ import shutil
 import json as JSON
 import sys
 import io
-
 
 class VaultClient():
     version_numbers = (0, 2, 0)
@@ -26,44 +26,56 @@ class VaultClient():
         self.private_key_path = private_key_path
         self.key_store_path = key_store_path
         self.session = requests.Session()
+        self.set_token(token)
+        self.load_key_store()
 
-        if token:
-            self.set_token(token, encrypted=False)
-
+    def load_key_store(self):
         if self.key_store_path:
-            read_private_path(self.key_store_path)
-        else:
-            self.user_store = FingerprintStore({})
+            try:
+                print(self.key_store_path)
+                store_data = security.read_private_path(self.key_store_path)
+            except FileNotFoundError:
+                self.key_store = FingerprintStore({})
+                return self.key_store
 
-    def set_token(self, token, encrypted=False):
-        if encrypted:
-            self.token = self.private_key.decrypt(from_b64_str(token)).decode('utf-8')
-        else:
-            self.token = token
+            self.key_store = FingerprintStore(JSON.loads(store_data))
+            return self.key_store
+
+        self.key_store = FingerprintStore({})
+        return self.key_store
+
+    def write_key_store(self):
+        if not self.key_store_path:
+            logging.warn('Unable to save key store changes. Missing key store path!')
+        security.write_private_path(
+            self.key_store_path,
+            JSON.dumps(self.key_store.export()),
+        )
+
+    def set_token(self, token):
+        self.token = token
         self.session.headers = {
             'X-VAULT-USER': self.user,
-            'X-VAULT-TOKEN': self.token,
+            'X-VAULT-TOKEN': self.token or '',
         }
 
+    def load_encrypted_token(self, encrypted_token, metadata):
+        token = self.rsa.decrypt(security.from_b64_str(encrypted_token)).decode('utf-8')
+        self.set_token(token)
+
+    def get_encrypted_token(self):
+        encrypted_token_bytes, meta = self.rsa.encrypt(self.token.encode('utf-8'))
+        encrypted_token = security.to_b64_str(encrypted_token_bytes)
+        return encrypted_token, meta
+
     def set_private_key(self, contents, passphrase=None):
-        self._private_key = security.RSA(key=contents, passphrase=passphrase)
+        self._rsa = security.RSA(contents, passphrase=passphrase)
 
     @property
-    def private_key(self):
-        if not hasattr(self, '_private_key'):
-            passphrase = getpass('Enter passphrase for key {}: '.format(self.private_key_path))
-            try:
-                self._private_key = security.load_rsa_key(self.private_key_path, passphrase=passphrase)
-            except Exception as e:
-                print('Could not load key at path:', self.private_key_path)
-                raise e
-        return self._private_key
-
-    @property
-    def public_key(self):
-        if not hasattr(self, '_public_key'):
-            self._public_key = security.RSA(self.private_key.get_public_key())
-        return self._public_key
+    def rsa(self):
+        if not hasattr(self, '_rsa'):
+            self._rsa = security.RSA(security.load_rsa_key(self.private_key_path))
+        return self._rsa
 
     def _request(self, method, path, json=True, **params):
         logging.debug('[{}] {}'.format(method, path))
@@ -118,61 +130,91 @@ class VaultClient():
     def query(self, search=None):
         return self._request('GET', '/docs/query', params={'q': search})
 
-    def doc_metadata(self, path, version=None, decrypt_key=False):
+    def doc_metadata(self, path, version=None):
         metadata = self._request('GET', '/doc/meta', params={
             'path': path,
             'version': version,
         })
-        if decrypt_key:
-            encrypted_key = metadata['encrypted_key']
-            key_bytes = self.private_key.decrypt(security.from_b64_str(encrypted_key))
-            metadata['key'] = security.to_b64_str(key_bytes)
         return metadata
 
     def doc_data(self, path, version=None):
-        return self._request('GET', '/doc/data', json=False, params={
+        raw_data = self._request('GET', '/doc/data', json=False, params={
             'path': path,
             'version': version,
         }).content
+        return raw_data
+
+    def decrypt_document_key(self, path, version=None):
+        meta = self.doc_metadata(path, version=version)
+        encrypted_key = metadata['encrypted_key']
+        key_bytes = self.rsa.decrypt(security.from_b64_str(encrypted_key))
+        return security.to_b64_str(key_bytes)
+
+    def decrypt_document(self, path, version=None, verify=True):
+        meta = self.doc_metadata(path, version=version)
+        encrypted_document = self.doc_data(path, version=version)
+
+        scheme = schemes.RSAScheme(self.rsa.get_private_key())
+        document = scheme.decrypt(encrypted_document, {
+            'rsa': meta['key_metadata'],
+            'aes': meta['document_metadata'],
+            'encrypted_key': meta['encrypted_key'],
+        })
+
+        # Verify Signature
+        if verify:
+            signature = meta.get('signature')
+            user = self.get_verified_user(meta['creator'])
+            signer = security.RSA(user['public_key'])
+            if not signer.verify(document, signature):
+                raise SecurityError('Data does not match fingerprint! The source data cannot be trusted.')
+        return document
 
     def list_versions(self, path, extract=None):
         return self._request('GET', '/doc/versions', params={'path': path})
 
-    def create_version(self, path, file_obj, update=False):
-        document_bytes = file_obj.read()
-        new_key = security.AES.generate_key()
-        key_bytes = security.from_b64_str(new_key)
-        aes = security.AES(key=new_key)
-        encrypted_document_bytes, document_metadata = aes.encrypt(document_bytes)
-        encrypted_key_bytes, key_metadata = self.public_key.encrypt(key_bytes)
+    def create_version(self, path, data, update=False):
+        document_bytes = data
+        document_signature = self.rsa.sign(data)
+
+        scheme = schemes.RSAScheme(self.rsa.get_private_key())
+        ciphertext, meta, aes_key = scheme.encrypt(document_bytes, include_aes_key=True)
+
+        encrypted_key = meta['encrypted_key']
+        key_metadata = meta['rsa']
+        document_metadata = meta['aes']
         
         if update:
             upload_uri = '/doc/update'
         else:
             upload_uri = '/docs/new'
         add_response = self._request('POST', upload_uri,
-            files={'encrypted_document': encrypted_document_bytes},
+            files={'encrypted_document': ciphertext},
             data={
                 'path': path,
-                'encrypted_key': security.to_b64_str(encrypted_key_bytes),
                 'document_metadata': JSON.dumps(document_metadata),
-                'key_metadata': JSON.dumps(key_metadata),
-                'document_fingerprint': hasher(document_bytes),
-                'key_fingerprint': hasher(key_bytes),
+                'signature': document_signature,
             },
         )
         self._request('POST', '/doc/sanction', data={
             'path': path,
             'user': self.user,
-            'encrypted_key': security.to_b64_str(encrypted_key_bytes),
+            'encrypted_key': encrypted_key,
             'key_metadata': JSON.dumps(key_metadata),
         })
         return add_response
 
+    def verify_user(self, user_obj):
+        fingerprint = security.RSA(user_obj['public_key']).get_fingerprint()
+        self.key_store.verify_user(user_obj['user_name'], fingerprint)
+
+    def get_verified_user(self, user_name):
+        user_data = self.get_user(user_name)
+        self.verify_user(user_data)
+        return user_data
+
     def sanction(self, path, user=None, force=False):
-        user_data = self.get_user(user)
-        if not self.user_store.can_trust_user(user, user_data['public_key']):
-            raise SecurityError('SECURITY ERROR: Unable to validate public key of user {}'.format(user))
+        user_data = self.get_verified_user(user)
 
         doc_metadata = self.doc_metadata(path, decrypt_key=True)
         rsa = security.RSA(key=user_data['public_key'])
@@ -180,7 +222,7 @@ class VaultClient():
         return self._request('POST', '/doc/sanction', data={
             'path': path,
             'user': user,
-            'encrypted_key': to_b64_str(encrypted_key_bytes),
+            'encrypted_key': security.to_b64_str(encrypted_key_bytes),
             'key_metadata': JSON.dumps(metadata),
         })
 
