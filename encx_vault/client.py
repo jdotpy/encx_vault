@@ -32,7 +32,6 @@ class VaultClient():
     def load_key_store(self):
         if self.key_store_path:
             try:
-                print(self.key_store_path)
                 store_data = security.read_private_path(self.key_store_path)
             except FileNotFoundError:
                 self.key_store = FingerprintStore({})
@@ -146,7 +145,7 @@ class VaultClient():
 
     def decrypt_document_key(self, path, version=None):
         meta = self.doc_metadata(path, version=version)
-        encrypted_key = metadata['encrypted_key']
+        encrypted_key = meta['encrypted_key']
         key_bytes = self.rsa.decrypt(security.from_b64_str(encrypted_key))
         return security.to_b64_str(key_bytes)
 
@@ -213,12 +212,14 @@ class VaultClient():
         self.verify_user(user_data)
         return user_data
 
-    def sanction(self, path, user=None, force=False):
-        user_data = self.get_verified_user(user)
+    def sanction(self, path, version=None, user=None, force=False):
+        key = self.decrypt_document_key(path, version=version)
 
-        doc_metadata = self.doc_metadata(path, decrypt_key=True)
+        user_data = self.get_verified_user(user)
         rsa = security.RSA(key=user_data['public_key'])
-        encrypted_key_bytes, metadata = rsa.encrypt(from_b64_str(doc_metadata['key']))
+        key_bytes = security.from_b64_str(key)
+        encrypted_key_bytes, metadata = rsa.encrypt(key_bytes)
+
         return self._request('POST', '/doc/sanction', data={
             'path': path,
             'user': user,

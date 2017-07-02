@@ -75,6 +75,11 @@ class VaultCommands(BasePlugin):
             'parser': 'parse_get',
             'help': 'Download and decrypt a document from vault',
         },
+        'vault:sanction': {
+            'run': 'cmd_sanction',
+            'parser': 'parse_sanction',
+            'help': 'Grant another user access to a document',
+        },
         'vault:history': {
             'run': 'cmd_history',
             'parser': 'parse_history',
