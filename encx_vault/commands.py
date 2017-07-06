@@ -26,6 +26,7 @@ class VaultCommands(BasePlugin):
     commands = {
         'vault:init': {
             'run': 'cmd_init',
+            'parser': 'parse_init',
             'help': 'Initialize your client init',
         },
         'vault:me': {
@@ -45,6 +46,11 @@ class VaultCommands(BasePlugin):
             'run': 'cmd_add_user',
             'help': 'Add a user to the vault',
             'parser': 'parse_add_user',
+        },
+        'vault:remove_user': {
+            'run': 'cmd_remove_user',
+            'help': 'Remove a user from the vault',
+            'parser': 'parse_remove_user',
         },
         'vault:trusted_users': {
             'run': 'cmd_trusted_users',
@@ -154,10 +160,12 @@ class VaultCommands(BasePlugin):
     def parse_init(self, parser):
         parser.add_argument('-s', '--server')
         parser.add_argument('-u', '--username')
+        parser.add_argument('-n', '--name')
 
     def cmd_init(self, args):
-        host = input('Enter url of vault server (e.g. https://vault.domain.com): ')
-        username = input('Enter user name: ')
+        host = args.server or input('Enter url of vault server (e.g. https://vault.domain.com): ')
+        username = args.username or input('Enter your assigned username: ')
+        name = args.name or input('Pick a name for yourself: ')
         token = getpass('Enter user token received during account creation: ')
         key_password = getpass('Enter a password for your new vault key: ')
 
@@ -168,7 +176,10 @@ class VaultCommands(BasePlugin):
         vault_client.set_private_key(security.RSA.generate_key())
 
         logging.info('Initializing your account....')
-        initialize_response = vault_client.init_user(vault_client.rsa.get_public_key())
+        initialize_response = vault_client.init_user(
+            vault_client.rsa.get_public_key(),
+            name=name,
+        )
         if initialize_response['success']:
             logging.info('... done!')
         else:
@@ -227,7 +238,7 @@ class VaultCommands(BasePlugin):
         assert key_matches
         if not key_matches:
             logging.error('CRITICAL SECURITY ERROR: Your public key no longer matches the vaults references. Your account has been compromised! Tell others to vault:untrust ' + self.vault.user)
-        print('Current User:', user_data['user_name'])
+        print('Current User: {} ({})'.format(user_data['user_name'], user_data['name']))
         print('Administrator?', user_data['is_admin'])
         print('Key fingerprint:', self.vault.rsa.get_fingerprint())
         print('Client Version:', self.vault.version)
@@ -235,6 +246,13 @@ class VaultCommands(BasePlugin):
     def cmd_ping(self, args):
         response = self.vault.ping()
         print(response['message'])
+
+    def parse_remove_user(self, parser):
+        parser.add_argument('user', help='Username of user to delete', nargs='?')
+
+    def cmd_remove_user(self, args):
+        response = self.vault.remove_user(args.user)
+        print('Removed user "{}".'.format(args.user))
 
     def parse_add_user(self, parser):
         parser.add_argument('user', help='Username for new user', nargs=1)

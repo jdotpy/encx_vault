@@ -101,23 +101,24 @@ class VaultClient():
     def ping(self):
         return self._request('GET', '/ping')
 
-    def get_root_user(self, fingerprint=True):
-        user_data = self._request('GET', '/user/root')['user']
-        if fingerprint:
-            user_data['fingerprint'] = security.RSA(key=user_data['public_key']).get_fingerprint()
-        return user_data
-
     def get_user(self, user_name, fingerprint=False):
-        user_data = self._request('GET', '/user', params={'user_name': user_name})['user']
+        user_data = self._request('GET', '/user/{}'.format(user_name))['user']
         if fingerprint:
-            user_data['fingerprint'] = security.RSA(key=user_data['public_key']).get_fingerprint()
+            rsa = security.RSA(key=user_data['public_key'])
+            user_data['fingerprint'] = rsa.get_fingerprint()
         return user_data
 
     def add_user(self, user_name):
         return self._request('POST', '/users/new', data={'user_name': user_name})
 
-    def init_user(self, public_key):
-        return self._request('POST', '/user/init', data={'public_key': public_key})
+    def remove_user(self, user_name):
+        return self._request('DELETE', '/user/{}'.format(user_name))
+
+    def init_user(self, public_key, name=None):
+        return self._request('POST', '/users/init', data={
+            'public_key': public_key,
+            'name': name,
+        })
 
     def audit_log(self, path=None, user=None, action=None):
         return self._request('GET', '/audit/log', params={
