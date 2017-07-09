@@ -47,6 +47,11 @@ class VaultCommands(BasePlugin):
             'help': 'Add a user to the vault',
             'parser': 'parse_add_user',
         },
+        'vault:edit': {
+            'run': 'cmd_edit',
+            'parser': 'parse_edit',
+            'help': 'Edit a file in the vault',
+        },
         'vault:remove_user': {
             'run': 'cmd_remove_user',
             'help': 'Remove a user from the vault',
@@ -103,7 +108,6 @@ class VaultCommands(BasePlugin):
         },
     }
 
-
     #############################
     ## Internals
 
@@ -136,6 +140,18 @@ class VaultCommands(BasePlugin):
             self._vault = vault
 
         return self._vault
+
+    def _parse_path(self, path):
+        """
+            This allows all parsing to base paths on the 
+            user's "home" directory on the vault
+        """
+        if not path:
+            return path
+        elif path.startswith('/'):
+            return path
+        else:
+            return '/{}/{}'.format(self.vault.user, path)
 
     #############################
     ## File loader definitions 
@@ -227,7 +243,7 @@ class VaultCommands(BasePlugin):
 
     def cmd_add(self, args):
         data_source = args.source[0]
-        target_path = args.target[0]
+        target_path = self._parse_path(args.target[0])
         source_data = self.client.load_file(data_source)
         self.vault.create_version(target_path, source_data, update=False)
 
@@ -308,11 +324,12 @@ class VaultCommands(BasePlugin):
         parser.add_argument('path', help='Path of document to destroy')
 
     def cmd_destroy(self, args):
-        response = self.vault.destroy(args.path)
+        path = self._parse_path(args.path)
+        response = self.vault.destroy(path)
         destroyed_docs = response['documents']
         print('Destroyed {} versions of document "{}"'.format(
             len(destroyed_docs),
-            args.path 
+            path,
         ))
         for doc in destroyed_docs:
             print(doc['id'])
@@ -337,8 +354,8 @@ class VaultCommands(BasePlugin):
 
         print_table(results['documents'], [
             ('path', 'Document'),
+            ('creator', 'Author'),
             ('created', 'Last Modified'),
-            ('id', 'Version'),
         ])
 
     def parse_audit(self, parser):
@@ -351,7 +368,11 @@ class VaultCommands(BasePlugin):
         if action:
             action = action.lower()
 
-        results = self.vault.audit_log(path=args.path, user=args.user, action=args.action)
+        results = self.vault.audit_log(
+            path=self._parse_path(args.path),
+            user=args.user,
+            action=args.action
+        )
         entries = results['log']
         if not entries:
             print('No results found!')
@@ -371,13 +392,19 @@ class VaultCommands(BasePlugin):
         parser.add_argument('-v', '--version', help='Version of document')
 
     def cmd_get(self, args):
-        document = self.vault.decrypt_document(args.path, args.version)
+        path = self._parse_path(args.path)
+        document = self.vault.decrypt_document(path, args.version)
         self.client.write_file(args.target, document)
 
-    def cmd_edit(self, args):
-        payload, metadata = self._get_document_data(args.path, args.version)
+    def parse_edit(self, parser):
+        parser.add_argument('path', help='Path of document to read')
+        parser.add_argument('-v', '--version', help='Version of document')
 
-        ext, validator = self.client.get_filetype_validator(None, path=args.path)
+    def cmd_edit(self, args):
+        path = self._parse_path(args.path)
+        payload = self.vault.decrypt_document(path, args.version)
+
+        ext, validator = self.client.get_filetype_validator(None, path=path)
         success, new_data = self.client.edit_data(
             payload,
             extension=ext,
@@ -386,15 +413,16 @@ class VaultCommands(BasePlugin):
         if not success:
             return success
 
-        self.vault.create_version(args.path, new_data, update=True)
+        self.vault.create_version(path, new_data, update=True)
         return success
 
     def parse_history(self, parser):
         parser.add_argument('path', help='Path of document')
 
     def cmd_history(self, args):
-        response = self.vault.list_versions(args.path)
-        print('Versions of document "{}"'.format(args.path))
+        path = self._parse_path(args.path)
+        response = self.vault.list_versions(path)
+        print('Versions of document "{}"'.format(path))
         print_table(response['documents'], [
             ('creator', 'Creator'),
             ('created', 'Timestamp'),
@@ -402,7 +430,8 @@ class VaultCommands(BasePlugin):
         ])
 
     def cmd_remove(self, args):
-        response = self.vault.remove(args.path, args.version)
+        path = self._parse_path(args.path)
+        response = self.vault.remove(path, args.version)
         print(response)
 
     ##########################
